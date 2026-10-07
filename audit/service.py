@@ -9,7 +9,7 @@ from typing import Any
 
 from audit.config import Settings, load_settings
 from audit.errors import IntegrityError, SequenceConflictError
-from audit.forwarder import AuditForwarder, Downstream
+from audit.forwarder import AuditForwarder, Downstream, HttpDownstream
 from audit.hashing import GENESIS_HASH
 from audit.integrity import append_to_chain, verify_chain
 from audit.models import VerifyResult
@@ -32,14 +32,21 @@ class AuditService:
                  downstream: Downstream | None = None):
         self.settings = settings or load_settings()
         self.storage = Storage(self.settings.data_dir)
-        self._downstream = downstream
         self._forwarder: AuditForwarder | None = None
-        if self.settings.forward_enabled and downstream is not None:
-            state_path = os.path.join(self.settings.data_dir,
-                                      self.settings.forward_state_file)
-            self._forwarder = AuditForwarder(
-                downstream, state_path=state_path,
-                max_attempts=self.settings.max_forward_attempts)
+        if self.settings.forward_enabled:
+            # An explicitly injected downstream wins; otherwise, when a
+            # URL is configured, forward to the real HTTP endpoint so the
+            # API trigger actually delivers.
+            if downstream is None and self.settings.forward_url:
+                downstream = HttpDownstream(
+                    self.settings.forward_url,
+                    timeout_seconds=self.settings.forward_timeout_seconds)
+            if downstream is not None:
+                state_path = os.path.join(self.settings.data_dir,
+                                          self.settings.forward_state_file)
+                self._forwarder = AuditForwarder(
+                    downstream, state_path=state_path,
+                    max_attempts=self.settings.max_forward_attempts)
 
     # ------------------------------------------------------------------ #
     def append(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -126,8 +133,11 @@ class AuditService:
     def forward(self) -> dict[str, Any]:
         """Flush pending records to the downstream (no loss / no dup)."""
         if self._forwarder is None:
-            return {"ok": False, "enabled": False,
-                    "reason": "forwarding_disabled"}
+            if not self.settings.forward_enabled:
+                return {"ok": False, "enabled": False,
+                        "reason": "forwarding_disabled"}
+            return {"ok": False, "enabled": True,
+                    "reason": "forward_url_not_configured"}
         with self.storage.locked():
             _cp, records = self.storage.load_all()
         return {"enabled": True, **self._forwarder.forward_pending(records)}

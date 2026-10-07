@@ -13,8 +13,10 @@ class Settings:
     data_dir: str = "data"
     retention_days: int = 90
     forward_enabled: bool = False
+    forward_url: str = ""
     forward_state_file: str = "forward.state"
     max_forward_attempts: int = 3
+    forward_timeout_seconds: float = 5.0
     sensitive_keys: frozenset[str] = frozenset(DEFAULT_SENSITIVE_KEYS)
 
 
@@ -36,6 +38,17 @@ def _env_int(name: str, default: int) -> int:
                          f"got {raw!r}") from exc
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"environment variable {name} must be a number, "
+                         f"got {raw!r}") from exc
+
+
 def load_settings() -> Settings:
     """Load settings from AUDIT_* environment variables."""
     extra = os.environ.get("AUDIT_SENSITIVE_KEYS", "").strip()
@@ -46,8 +59,10 @@ def load_settings() -> Settings:
         data_dir=os.environ.get("AUDIT_DATA_DIR", "data"),
         retention_days=_env_int("AUDIT_RETENTION_DAYS", 90),
         forward_enabled=_env_bool("AUDIT_FORWARD_ENABLED", False),
+        forward_url=os.environ.get("AUDIT_FORWARD_URL", "").strip(),
         forward_state_file=os.environ.get("AUDIT_FORWARD_STATE",
                                           "forward.state"),
         max_forward_attempts=_env_int("AUDIT_FORWARD_MAX_ATTEMPTS", 3),
+        forward_timeout_seconds=_env_float("AUDIT_FORWARD_TIMEOUT", 5.0),
         sensitive_keys=frozenset(keys),
     )

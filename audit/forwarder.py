@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+import urllib.error
+import urllib.request
 from typing import Any, Protocol
 
 from audit.models import AuditRecord
@@ -14,6 +17,40 @@ class Downstream(Protocol):
         """Raise on failure; no raise means the record is durable
         downstream."""
         ...
+
+
+class HttpDownstream:
+    """POSTs each record as JSON to a configured URL.
+
+    Only a 2xx response counts as delivered; anything else (connection
+    error, timeout, 4xx/5xx) raises so the forwarder retries and, if the
+    budget is exhausted, pauses in order without losing the record.
+    """
+
+    def __init__(self, url: str, *, timeout_seconds: float = 5.0):
+        if not url:
+            raise ValueError("forward url must not be empty")
+        self.url = url
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, record: dict[str, Any]) -> None:
+        body = json.dumps(record, ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")
+        request = urllib.request.Request(
+            self.url, data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(
+                    request, timeout=self.timeout_seconds) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                f"downstream responded HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"downstream unreachable: {exc.reason}") from exc
+        if not 200 <= status < 300:
+            raise RuntimeError(f"downstream responded HTTP {status}")
 
 
 class AuditForwarder:
