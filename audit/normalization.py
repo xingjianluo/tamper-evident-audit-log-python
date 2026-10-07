@@ -7,7 +7,9 @@ import re
 from datetime import datetime
 from typing import Any
 
-from audit.models import CURRENT_VERSION, SUPPORTED_VERSIONS, AuditRecord
+from audit.models import (
+    CURRENT_VERSION, LEGACY_VERSION, SUPPORTED_VERSIONS, AuditRecord,
+)
 from audit.errors import SchemaValidationError
 
 #: Sensitive keys are masked before hashing/persistence.
@@ -27,6 +29,20 @@ _INPUT_FIELDS = frozenset({
     "version", "id", "timestamp", "actor", "action", "resource", "detail",
 })
 _REQUIRED_FIELDS = ("id", "timestamp", "actor", "action", "resource")
+
+#: Legacy (v0) inbound field names mapped to the canonical names. The
+#: legacy generation names the same operation/actor/time/detail
+#: differently; every declared legacy field has a canonical home, so no
+#: information is lost because of naming.
+_LEGACY_FIELD_MAP = {
+    "event_id": "id",
+    "occurred_at": "timestamp",
+    "principal": "actor",
+    "operation": "action",
+    "object": "resource",
+    "attrs": "detail",
+}
+_LEGACY_INPUT_FIELDS = frozenset(_LEGACY_FIELD_MAP) | {"version"}
 #: Fields accepted on a persisted record.
 _STORED_FIELDS = frozenset({
     "version", "seq", "id", "timestamp", "actor", "action", "resource",
@@ -107,10 +123,41 @@ def _require_nonempty_str(raw: dict[str, Any], name: str) -> str:
     return value
 
 
+def _translate_legacy(raw: dict[str, Any]) -> dict[str, Any]:
+    """Translate a legacy (v0) payload to canonical field names.
+
+    Unknown legacy fields raise (nothing is silently dropped); missing
+    required fields raise naming the *legacy* field so the sender can
+    recognize its own schema in the error.
+    """
+    unknown = set(raw) - _LEGACY_INPUT_FIELDS
+    if unknown:
+        raise SchemaValidationError(
+            f"unknown_field: {sorted(unknown)} (nothing is silently dropped)")
+    translated: dict[str, Any] = {}
+    for legacy_name, canonical_name in _LEGACY_FIELD_MAP.items():
+        if legacy_name in raw:
+            translated[canonical_name] = raw[legacy_name]
+    # Report missing fields by their *legacy* names so the sender can
+    # recognize its own schema in the error.
+    legacy_by_canonical = {v: k for k, v in _LEGACY_FIELD_MAP.items()}
+    for name in _REQUIRED_FIELDS:
+        if name not in translated:
+            raise SchemaValidationError(
+                f"missing_field: {legacy_by_canonical[name]} "
+                f"(legacy v0 name for {name})")
+    return translated
+
+
 def normalize_input(raw: dict[str, Any], *, seq: int,
                     sensitive_keys: frozenset[str] = DEFAULT_SENSITIVE_KEYS
                     ) -> AuditRecord:
     """Validate + normalize an inbound payload into an AuditRecord.
+
+    Both supported generations (v0 legacy field names, v1 current field
+    names) are normalized to the *same* canonical record at
+    ``CURRENT_VERSION``; from here on -- hashing, persistence, listing,
+    verification -- there is exactly one judgment standard.
 
     Unknown fields raise. Missing required fields raise. Illegal values
     raise. Nothing is silently dropped or filled. Sensitive values are
@@ -119,11 +166,6 @@ def normalize_input(raw: dict[str, Any], *, seq: int,
     if not isinstance(raw, dict):
         raise SchemaValidationError("illegal_value: payload must be an object")
 
-    unknown = set(raw) - _INPUT_FIELDS
-    if unknown:
-        raise SchemaValidationError(
-            f"unknown_field: {sorted(unknown)} (nothing is silently dropped)")
-
     version = raw.get("version", CURRENT_VERSION)
     if not isinstance(version, int) or isinstance(version, bool):
         raise SchemaValidationError("illegal_value: version must be an integer")
@@ -131,6 +173,15 @@ def normalize_input(raw: dict[str, Any], *, seq: int,
         raise SchemaValidationError(
             f"unsupported_version: {version} "
             f"(supported: {sorted(SUPPORTED_VERSIONS)})")
+
+    if version == LEGACY_VERSION:
+        raw = _translate_legacy(raw)
+    else:
+        unknown = set(raw) - _INPUT_FIELDS
+        if unknown:
+            raise SchemaValidationError(
+                f"unknown_field: {sorted(unknown)} "
+                f"(nothing is silently dropped)")
 
     rec_id = _require_nonempty_str(raw, "id")
     actor = _require_nonempty_str(raw, "actor")
@@ -151,7 +202,7 @@ def normalize_input(raw: dict[str, Any], *, seq: int,
     masked_detail = mask_sensitive(detail, sensitive_keys)
 
     return AuditRecord(
-        version=version,
+        version=CURRENT_VERSION,  # normalized: one stored form for all
         seq=seq,
         id=rec_id,
         timestamp=timestamp,

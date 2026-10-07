@@ -5,10 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
-#: Current record format version handled by this build.
+#: Current record format version handled by this build. Every record is
+#: normalized to this version before it enters the chain, so the stored
+#: form is uniform regardless of the inbound generation.
 CURRENT_VERSION = 1
-#: Set of versions we know how to normalize.
-SUPPORTED_VERSIONS = frozenset({1})
+#: Legacy inbound format version (different field names, same semantics).
+LEGACY_VERSION = 0
+#: Set of inbound versions we know how to normalize.
+SUPPORTED_VERSIONS = frozenset({0, 1})
 
 #: Fields that make up the canonical (hash-covered) payload.
 CANONICAL_FIELDS = ("version", "seq", "id", "timestamp", "actor",
