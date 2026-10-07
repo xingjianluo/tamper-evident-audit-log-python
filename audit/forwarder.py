@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import threading
+import urllib.error
+import urllib.request
 from typing import Any, Protocol
 
 from audit.models import AuditRecord
@@ -13,6 +17,35 @@ class Downstream(Protocol):
         """Raise on failure; no raise means the record is durable
         downstream."""
         ...
+
+
+class HttpDownstream:
+    """POSTs each record as JSON to a configured URL.
+
+    Any connection problem, timeout or non-2xx response raises, which the
+    forwarder treats as a retryable failure; only a 2xx means the record
+    is durable downstream.
+    """
+
+    def __init__(self, url: str, *, timeout_seconds: float = 5.0):
+        if not url:
+            raise ValueError("downstream url must not be empty")
+        self.url = url
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, record: dict[str, Any]) -> None:
+        body = json.dumps(record, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.url, data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(
+                    request, timeout=self.timeout_seconds) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        if not 200 <= status < 300:
+            raise RuntimeError(f"downstream answered HTTP {status}")
 
 
 class AuditForwarder:
@@ -40,6 +73,9 @@ class AuditForwarder:
         self.downstream = downstream
         self.state_path = state_path
         self.max_attempts = max_attempts
+        # Serializes forward runs: two concurrent flushes must neither
+        # double-send a record nor race on the cursor temp file.
+        self._flush_lock = threading.Lock()
         self._delivered: set[str] = set()
         self._cursor = self._load_state()
         self._recover_ledger()
@@ -92,8 +128,15 @@ class AuditForwarder:
         first record whose attempts are exhausted, forwarding stops with a
         structured summary and the cursor left at the last success, so a
         later call (or a restart) resumes exactly there without skipping or
-        resending acknowledged records.
+        resending acknowledged records. Concurrent invocations are
+        serialized: the loser of the race re-reads the advanced cursor
+        and simply has nothing to send.
         """
+        with self._flush_lock:
+            return self._forward_pending_locked(records)
+
+    def _forward_pending_locked(self,
+                                records: list[AuditRecord]) -> dict[str, Any]:
         sent = 0
         skipped_duplicates = 0
         attempted = 0

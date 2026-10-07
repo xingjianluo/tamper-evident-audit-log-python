@@ -7,8 +7,10 @@ from typing import Any
 
 #: Current record format version handled by this build.
 CURRENT_VERSION = 1
+#: Legacy record format version (different field names, same semantics).
+LEGACY_VERSION = 0
 #: Set of versions we know how to normalize.
-SUPPORTED_VERSIONS = frozenset({1})
+SUPPORTED_VERSIONS = frozenset({LEGACY_VERSION, CURRENT_VERSION})
 
 #: Fields that make up the canonical (hash-covered) payload.
 CANONICAL_FIELDS = ("version", "seq", "id", "timestamp", "actor",

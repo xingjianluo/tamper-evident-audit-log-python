@@ -1,7 +1,8 @@
 # tamper-evident-audit-log (Python bootstrap)
 
 在现有 FastAPI 服务内实现的本地可验证防篡改审计链路：哈希链追加、并发安全
-序号、敏感字段脱敏、保留期剪枝、下游转发重试与积压恢复。
+序号、跨版本（v0 旧格式 / v1 当前格式）归一化、敏感字段脱敏、与转发进度
+联动的保留期剪枝、下游转发（HTTP 真实下发）重试与积压恢复。
 
 - 设计、判定语义与本地验证方法：[docs/AUDIT.md](docs/AUDIT.md)
 - 运行测试（日志含输入 / 判定依据 / 结论）：`uv run pytest -s`

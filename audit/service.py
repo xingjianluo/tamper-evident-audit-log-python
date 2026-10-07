@@ -9,7 +9,7 @@ from typing import Any
 
 from audit.config import Settings, load_settings
 from audit.errors import IntegrityError, SequenceConflictError
-from audit.forwarder import AuditForwarder, Downstream
+from audit.forwarder import AuditForwarder, Downstream, HttpDownstream
 from audit.hashing import GENESIS_HASH
 from audit.integrity import append_to_chain, verify_chain
 from audit.models import VerifyResult
@@ -34,12 +34,21 @@ class AuditService:
         self.storage = Storage(self.settings.data_dir)
         self._downstream = downstream
         self._forwarder: AuditForwarder | None = None
-        if self.settings.forward_enabled and downstream is not None:
-            state_path = os.path.join(self.settings.data_dir,
-                                      self.settings.forward_state_file)
-            self._forwarder = AuditForwarder(
-                downstream, state_path=state_path,
-                max_attempts=self.settings.max_forward_attempts)
+        if self.settings.forward_enabled:
+            # An explicitly injected downstream wins; otherwise fall back
+            # to the configured URL so the HTTP entrypoint can really
+            # deliver, not just report "disabled".
+            sink = downstream
+            if sink is None and self.settings.forward_url:
+                sink = HttpDownstream(
+                    self.settings.forward_url,
+                    timeout_seconds=self.settings.forward_timeout_seconds)
+            if sink is not None:
+                state_path = os.path.join(self.settings.data_dir,
+                                          self.settings.forward_state_file)
+                self._forwarder = AuditForwarder(
+                    sink, state_path=state_path,
+                    max_attempts=self.settings.max_forward_attempts)
 
     # ------------------------------------------------------------------ #
     def append(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -87,11 +96,21 @@ class AuditService:
         The retained set is computed from the snapshot taken *inside* the
         lock and rewritten atomically; any append during the operation
         blocks on the same lock first, so new writes are never deleted.
+
+        When forwarding is enabled, the durable forwarding cursor gates
+        deletion: an expired record whose seq is still ahead of the
+        cursor is kept until the downstream acknowledges it. The cursor
+        only ever advances *after* a successful send, so reading it here
+        can never delete an undelivered record. With forwarding disabled
+        (or fully caught up) the policy is exactly the time-based one.
         """
         with self.storage.locked():
             checkpoint, records = self.storage.load_all()
+            forwarded_through = (self._forwarder.load_state()
+                                 if self._forwarder is not None else None)
             new_cp, retained = compute_retained(
-                records, retention_days=self.settings.retention_days, now=now)
+                records, retention_days=self.settings.retention_days, now=now,
+                forwarded_through=forwarded_through)
             if new_cp is None:
                 return {"pruned": 0, "kept": len(records), "rewritten": False}
             pruned = len(records) - len(retained)
@@ -109,8 +128,11 @@ class AuditService:
     def forward(self) -> dict[str, Any]:
         """Flush pending records to the downstream (no loss / no dup)."""
         if self._forwarder is None:
-            return {"ok": False, "enabled": False,
-                    "reason": "forwarding_disabled"}
+            reason = ("forwarding_not_configured"
+                      if self.settings.forward_enabled
+                      else "forwarding_disabled")
+            return {"ok": False, "enabled": self.settings.forward_enabled,
+                    "reason": reason}
         with self.storage.locked():
             _cp, records = self.storage.load_all()
         return {"enabled": True, **self._forwarder.forward_pending(records)}

@@ -7,7 +7,9 @@ import re
 from datetime import datetime
 from typing import Any
 
-from audit.models import CURRENT_VERSION, SUPPORTED_VERSIONS, AuditRecord
+from audit.models import (
+    CURRENT_VERSION, LEGACY_VERSION, SUPPORTED_VERSIONS, AuditRecord,
+)
 from audit.errors import SchemaValidationError
 
 #: Sensitive keys are masked before hashing/persistence.
@@ -22,11 +24,24 @@ DEFAULT_SENSITIVE_KEYS = frozenset({
 #: response.
 MASK_TOKEN = "__redacted__"
 
-#: Fields accepted on the inbound payload.
+#: Fields accepted on the inbound payload (current version).
 _INPUT_FIELDS = frozenset({
     "version", "id", "timestamp", "actor", "action", "resource", "detail",
 })
 _REQUIRED_FIELDS = ("id", "timestamp", "actor", "action", "resource")
+#: Legacy (v0) field names mapped onto the canonical names. The legacy
+#: payload expresses the same operation/actor/time/detail with different
+#: key names; every canonical field has exactly one legacy source, so
+#: normalization loses nothing and invents nothing.
+_LEGACY_FIELD_MAP = {
+    "event_id": "id",
+    "at": "timestamp",
+    "user": "actor",
+    "op": "action",
+    "target": "resource",
+    "meta": "detail",
+}
+_LEGACY_INPUT_FIELDS = frozenset({"version", *_LEGACY_FIELD_MAP})
 #: Fields accepted on a persisted record.
 _STORED_FIELDS = frozenset({
     "version", "seq", "id", "timestamp", "actor", "action", "resource",
@@ -107,10 +122,34 @@ def _require_nonempty_str(raw: dict[str, Any], name: str) -> str:
     return value
 
 
+def _translate_legacy(raw: dict[str, Any]) -> dict[str, Any]:
+    """Map a legacy (v0) payload onto canonical field names.
+
+    Unknown legacy fields raise (nothing is silently dropped); the
+    canonical field names are *not* accepted on a v0 payload, so a
+    mixed-generation payload is rejected rather than half-translated.
+    """
+    unknown = set(raw) - _LEGACY_INPUT_FIELDS
+    if unknown:
+        raise SchemaValidationError(
+            f"unknown_field: {sorted(unknown)} on a v{LEGACY_VERSION} payload "
+            f"(nothing is silently dropped)")
+    translated: dict[str, Any] = {}
+    for legacy_name, canonical_name in _LEGACY_FIELD_MAP.items():
+        if legacy_name in raw:
+            translated[canonical_name] = raw[legacy_name]
+    return translated
+
+
 def normalize_input(raw: dict[str, Any], *, seq: int,
                     sensitive_keys: frozenset[str] = DEFAULT_SENSITIVE_KEYS
                     ) -> AuditRecord:
     """Validate + normalize an inbound payload into an AuditRecord.
+
+    Both supported generations (legacy v0 field names, current v1) are
+    normalized onto the *same* canonical semantics before chaining, so
+    downstream masking, persistence, listing and verification apply one
+    uniform standard regardless of the source generation.
 
     Unknown fields raise. Missing required fields raise. Illegal values
     raise. Nothing is silently dropped or filled. Sensitive values are
@@ -119,11 +158,6 @@ def normalize_input(raw: dict[str, Any], *, seq: int,
     if not isinstance(raw, dict):
         raise SchemaValidationError("illegal_value: payload must be an object")
 
-    unknown = set(raw) - _INPUT_FIELDS
-    if unknown:
-        raise SchemaValidationError(
-            f"unknown_field: {sorted(unknown)} (nothing is silently dropped)")
-
     version = raw.get("version", CURRENT_VERSION)
     if not isinstance(version, int) or isinstance(version, bool):
         raise SchemaValidationError("illegal_value: version must be an integer")
@@ -131,6 +165,15 @@ def normalize_input(raw: dict[str, Any], *, seq: int,
         raise SchemaValidationError(
             f"unsupported_version: {version} "
             f"(supported: {sorted(SUPPORTED_VERSIONS)})")
+
+    if version == LEGACY_VERSION:
+        raw = _translate_legacy(raw)
+    else:
+        unknown = set(raw) - _INPUT_FIELDS
+        if unknown:
+            raise SchemaValidationError(
+                f"unknown_field: {sorted(unknown)} "
+                f"(nothing is silently dropped)")
 
     rec_id = _require_nonempty_str(raw, "id")
     actor = _require_nonempty_str(raw, "actor")

@@ -17,20 +17,31 @@ def parse_ts(ts: str) -> datetime:
 
 def compute_retained(records: list[AuditRecord], *,
                      retention_days: int,
-                     now: datetime | None = None
+                     now: datetime | None = None,
+                     forwarded_through: int | None = None
                      ) -> tuple[Checkpoint | None, list[AuditRecord]]:
     """Decide what survives a retention prune.
 
-    Records older than ``retention_days`` are eligible for removal. Only
-    a *contiguous prefix* is removed: pruning stops at the first record
-    still within the window, so no in-window record can be deleted and no
-    hole can appear. The last removed record becomes the checkpoint
-    anchor (its hash keeps the shortened chain verifiable).
+    Records older than ``retention_days`` are eligible for removal — but
+    only once the downstream has acknowledged them: when
+    ``forwarded_through`` (the durable forwarding cursor) is given, any
+    record with ``seq > forwarded_through`` is kept even if expired, so an
+    overdue record can never be deleted before it was delivered. When
+    forwarding is disabled (``forwarded_through is None``) or the cursor
+    has caught up, the rule degenerates to the pure time-based policy.
+
+    Only a *contiguous prefix* is removed: pruning stops at the first
+    record that is in-window or not yet forwarded, so no in-use record
+    can be deleted and no hole can appear. The last removed record
+    becomes the checkpoint anchor (its hash keeps the shortened chain
+    verifiable).
 
     Returns ``(None, records)`` unchanged when nothing is prunable.
     """
     if retention_days < 0:
         raise ValueError("retention_days must be >= 0")
+    if forwarded_through is not None and forwarded_through < 0:
+        raise ValueError("forwarded_through must be >= 0")
     if not records:
         return None, records
 
@@ -42,7 +53,9 @@ def compute_retained(records: list[AuditRecord], *,
 
     cut = 0
     for rec in records:
-        if parse_ts(rec.timestamp) < cutoff:
+        expired = parse_ts(rec.timestamp) < cutoff
+        delivered = forwarded_through is None or rec.seq <= forwarded_through
+        if expired and delivered:
             cut += 1
         else:
             break  # contiguous prefix only
