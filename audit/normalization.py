@@ -7,10 +7,13 @@ import re
 from datetime import datetime
 from typing import Any
 
-from audit.models import (
-    CURRENT_VERSION, LEGACY_VERSION, SUPPORTED_VERSIONS, AuditRecord,
-)
 from audit.errors import SchemaValidationError
+from audit.models import (
+    CURRENT_VERSION,
+    LEGACY_VERSION,
+    SUPPORTED_VERSIONS,
+    AuditRecord,
+)
 
 #: Sensitive keys are masked before hashing/persistence.
 DEFAULT_SENSITIVE_KEYS = frozenset({

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,10 +19,10 @@ from tests.conftest import log_case
 
 
 class _Handler(BaseHTTPRequestHandler):
-    received: list[dict] = []
-    fail_with_500 = False
+    received: ClassVar[list[dict]] = []
+    fail_with_500: ClassVar[bool] = False
 
-    def do_POST(self):  # noqa: N802 - stdlib handler API
+    def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         if self.fail_with_500:

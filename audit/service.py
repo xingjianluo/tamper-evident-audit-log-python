@@ -104,7 +104,7 @@ class AuditService:
         conservative (keep more), never unsafe.
         """
         with self.storage.locked():
-            checkpoint, records = self.storage.load_all()
+            _cp, records = self.storage.load_all()
             cursor = (self._forwarder.load_state()
                       if self._forwarder is not None else None)
             new_cp, retained = compute_retained(
