@@ -14,7 +14,7 @@ from audit.hashing import GENESIS_HASH
 from audit.integrity import append_to_chain, verify_chain
 from audit.models import VerifyResult
 from audit.normalization import normalize_input
-from audit.retention import compute_retained
+from audit.retention import compute_retained, count_expired
 from audit.storage import Storage
 
 
@@ -87,13 +87,29 @@ class AuditService:
         The retained set is computed from the snapshot taken *inside* the
         lock and rewritten atomically; any append during the operation
         blocks on the same lock first, so new writes are never deleted.
+
+        Forwarding coordination: the forward cursor is read inside the
+        same lock, and records not yet acknowledged downstream
+        (``seq > cursor``) are kept even when expired, so a record can
+        never be deleted before the downstream has durably received it.
+        The cursor only moves forward, so a concurrent forward between
+        the read and the rewrite can only make this decision
+        conservative (keep more), never unsafe.
         """
         with self.storage.locked():
             checkpoint, records = self.storage.load_all()
+            cursor = (self._forwarder.load_state()
+                      if self._forwarder is not None else None)
             new_cp, retained = compute_retained(
-                records, retention_days=self.settings.retention_days, now=now)
+                records, retention_days=self.settings.retention_days,
+                now=now, forwarded_cursor=cursor)
+            held = count_expired(
+                retained, retention_days=self.settings.retention_days,
+                now=now)
             if new_cp is None:
-                return {"pruned": 0, "kept": len(records), "rewritten": False}
+                return {"pruned": 0, "kept": len(records),
+                        "rewritten": False, "forward_cursor": cursor,
+                        "held_for_forward": held}
             pruned = len(records) - len(retained)
             self.storage.rewrite(new_cp, retained)
             verdict = verify_chain(new_cp, retained)
@@ -104,6 +120,7 @@ class AuditService:
                     f"post-prune verification failed: {verdict.reason}")
             return {"pruned": pruned, "kept": len(retained),
                     "rewritten": True, "checkpoint_seq": new_cp.seq,
+                    "forward_cursor": cursor, "held_for_forward": held,
                     "verify": verdict.to_dict()}
 
     def forward(self) -> dict[str, Any]:

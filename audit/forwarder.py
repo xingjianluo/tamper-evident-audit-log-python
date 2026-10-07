@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Protocol
 
 from audit.models import AuditRecord
@@ -40,6 +41,9 @@ class AuditForwarder:
         self.downstream = downstream
         self.state_path = state_path
         self.max_attempts = max_attempts
+        # Serializes concurrent forward_pending() calls: cursor tmp-file
+        # names and the in-order guarantee assume one sender at a time.
+        self._send_lock = threading.Lock()
         self._delivered: set[str] = set()
         self._cursor = self._load_state()
         self._recover_ledger()
@@ -94,6 +98,11 @@ class AuditForwarder:
         later call (or a restart) resumes exactly there without skipping or
         resending acknowledged records.
         """
+        with self._send_lock:
+            return self._forward_pending_locked(records)
+
+    def _forward_pending_locked(self,
+                                records: list[AuditRecord]) -> dict[str, Any]:
         sent = 0
         skipped_duplicates = 0
         attempted = 0

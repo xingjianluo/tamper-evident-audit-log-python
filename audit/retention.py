@@ -15,9 +15,27 @@ def parse_ts(ts: str) -> datetime:
     return dt
 
 
+def _resolve_now(now: datetime | None) -> datetime:
+    if now is None:
+        return datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=timezone.utc)
+    return now
+
+
+def count_expired(records: list[AuditRecord], *, retention_days: int,
+                  now: datetime | None = None) -> int:
+    """How many of *records* are past the retention window (used to make
+    prune results explainable when expired records are held back for
+    pending forwarding)."""
+    cutoff = _resolve_now(now) - timedelta(days=retention_days)
+    return sum(1 for r in records if parse_ts(r.timestamp) < cutoff)
+
+
 def compute_retained(records: list[AuditRecord], *,
                      retention_days: int,
-                     now: datetime | None = None
+                     now: datetime | None = None,
+                     forwarded_cursor: int | None = None
                      ) -> tuple[Checkpoint | None, list[AuditRecord]]:
     """Decide what survives a retention prune.
 
@@ -27,6 +45,13 @@ def compute_retained(records: list[AuditRecord], *,
     hole can appear. The last removed record becomes the checkpoint
     anchor (its hash keeps the shortened chain verifiable).
 
+    When ``forwarded_cursor`` is given (the highest seq acknowledged by
+    the downstream), records with ``seq > forwarded_cursor`` have not
+    been handed off yet and are kept *even if expired*; pruning stops at
+    the first such record. With ``forwarded_cursor=None`` (forwarding
+    disabled) or a cursor that has caught up, behavior is exactly the
+    plain time-based rule.
+
     Returns ``(None, records)`` unchanged when nothing is prunable.
     """
     if retention_days < 0:
@@ -34,14 +59,12 @@ def compute_retained(records: list[AuditRecord], *,
     if not records:
         return None, records
 
-    if now is None:
-        now = datetime.now(timezone.utc)
-    elif now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    cutoff = now - timedelta(days=retention_days)
+    cutoff = _resolve_now(now) - timedelta(days=retention_days)
 
     cut = 0
     for rec in records:
+        if forwarded_cursor is not None and rec.seq > forwarded_cursor:
+            break  # not delivered downstream yet: keep despite expiry
         if parse_ts(rec.timestamp) < cutoff:
             cut += 1
         else:
